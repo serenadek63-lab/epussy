@@ -1,0 +1,380 @@
+--[[
+    epussy ULTIMATE COMBAT SUITE
+    Perma-Weave | No Delay | Infinite Hitbox
+]]
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+local UserInputService  = game:GetService("UserInputService")
+
+local LP = Players.LocalPlayer
+print("[epussy] Booting Ultimate Combat Suite...")
+
+local function safeRequire(pathParts, timeout)
+    local node = ReplicatedStorage
+    timeout = timeout or 5
+    local t0 = os.clock()
+    for _, name in ipairs(pathParts) do
+        local obj = node:FindFirstChild(name)
+        while not obj and os.clock() - t0 < timeout do
+            task.wait(0.05)
+            obj = node:FindFirstChild(name)
+        end
+        if not obj then return nil end
+        node = obj
+    end
+    local ok, mod = pcall(require, node)
+    if ok then return mod end
+    return nil
+end
+
+-- 1. Fetch Modules
+local Remotes = safeRequire({ "Shared", "Net", "Remotes" }, 8)
+local HitWindow = safeRequire({ "Client", "Combat", "HitWindow" }, 8)
+local AttackState = safeRequire({ "Client", "Combat", "AttackState" }, 8)
+local Combat = nil
+
+if Remotes and Remotes.Client then
+    local ok, c = pcall(function() return Remotes.Client("CombatService") end)
+    if ok then Combat = c end
+end
+
+if not HitWindow or not Combat or not AttackState then
+    warn("[epussy] FATAL: Missing combat modules.")
+    return
+end
+
+local origHWStart = HitWindow.Start
+local Active = AttackState.Active
+
+-- Variables
+local isPermaWeave = false
+local isNoDelay = false
+local isHitbox = false
+local maxRange = math.huge
+local lastPunch = 0
+
+-- Hitbox config
+local HITBOX_MAX   = 15.2
+local SERVER_REACH = 5.8
+
+local function characterOf(player)
+    local ch = player.Character
+    if not ch then return nil end
+    local hum = ch:FindFirstChildOfClass("Humanoid")
+    local hrp = ch:FindFirstChild("HumanoidRootPart")
+    if not hum or not hrp or hum.Health <= 0 then return nil end
+    return ch, hum, hrp
+end
+
+local function friendly(player)
+    if player == LP then return true end
+    local mine = LP.Team
+    return mine ~= nil and player.Team == mine
+end
+
+local function effectiveReach()
+    local base = isHitbox and maxRange or 6
+    return math.min(base, HITBOX_MAX)
+end
+
+local function collect(radius)
+    local ch = characterOf(LP)
+    if not ch then return {} end
+    local origin = ch:GetPivot().Position
+    local cap = math.min(radius, HITBOX_MAX)
+    local out = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if not friendly(player) then
+            local tch, hum, hrp = characterOf(player)
+            if tch then
+                local d = (hrp.Position - origin).Magnitude
+                if d <= cap then
+                    out[#out + 1] = { player = player, char = tch, hum = hum, root = hrp, dist = d }
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b) return a.dist < b.dist end)
+    return out
+end
+
+local function spoofPositionFor(target)
+    local myRoot = LP.Character and LP.Character:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return target.root.Position end
+    return myRoot.Position + myRoot.CFrame.LookVector * 2
+end
+
+local function reportOnce(seq, target)
+    if not Combat or not Combat.HitReport then return false end
+    if not target.root or not target.root:IsA("BasePart") then return false end
+    if target.dist and target.dist > HITBOX_MAX then return false end
+    local reportPos = target.root.Position
+    if isHitbox then reportPos = spoofPositionFor(target) end
+    local ok = pcall(function() Combat.HitReport:Fire(seq, target.root, reportPos) end)
+    return ok
+end
+
+local function reportDouble(seq, target)
+    if not reportOnce(seq, target) then return end
+end
+
+local function reportTarget(seq, target)
+    if not target or not target.hum or target.hum.Health <= 0 then return end
+    reportDouble(seq, target)
+end
+
+-- 2. Setup UI
+local parentGui = LP:FindFirstChild("PlayerGui") or game:GetService("CoreGui")
+if parentGui:FindFirstChild("epussyUltimate") then parentGui.epussyUltimate:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "epussyUltimate"
+gui.ResetOnSpawn = false
+gui.Parent = parentGui
+
+-- Main Frame
+local main = Instance.new("Frame")
+main.Size = UDim2.new(0, 260, 0, 260)
+main.Position = UDim2.new(0, 10, 0, 10)
+main.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+main.BorderSizePixel = 0
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+
+-- Title
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundTransparency = 1
+title.Font = Enum.Font.GothamBold
+title.TextSize = 16
+title.TextColor3 = Color3.fromRGB(245, 245, 250)
+title.Text = "EPUSSY COMBAT SUITE"
+title.Parent = main
+
+-- ===== PERMA WEAVE =====
+local pwBtn = Instance.new("TextButton")
+pwBtn.Size = UDim2.new(1, -20, 0, 35)
+pwBtn.Position = UDim2.new(0, 10, 0, 40)
+pwBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+pwBtn.TextColor3 = Color3.new(1, 1, 1)
+pwBtn.Font = Enum.Font.GothamBold
+pwBtn.TextSize = 14
+pwBtn.Text = "Perma Weave: OFF"
+pwBtn.Active = true
+pwBtn.Parent = main
+Instance.new("UICorner", pwBtn).CornerRadius = UDim.new(0, 6)
+
+-- ===== NO DELAY =====
+local ndBtn = Instance.new("TextButton")
+ndBtn.Size = UDim2.new(1, -20, 0, 35)
+ndBtn.Position = UDim2.new(0, 10, 0, 85)
+ndBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+ndBtn.TextColor3 = Color3.new(1, 1, 1)
+ndBtn.Font = Enum.Font.GothamBold
+ndBtn.TextSize = 14
+ndBtn.Text = "No Delay: OFF"
+ndBtn.Active = true
+ndBtn.Parent = main
+Instance.new("UICorner", ndBtn).CornerRadius = UDim.new(0, 6)
+
+-- ===== INFINITE HITBOX =====
+local hbBtn = Instance.new("TextButton")
+hbBtn.Size = UDim2.new(1, -20, 0, 35)
+hbBtn.Position = UDim2.new(0, 10, 0, 130)
+hbBtn.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+hbBtn.TextColor3 = Color3.new(1, 1, 1)
+hbBtn.Font = Enum.Font.GothamBold
+hbBtn.TextSize = 14
+hbBtn.Text = "Infinite Hitbox: OFF"
+hbBtn.Active = true
+hbBtn.Parent = main
+Instance.new("UICorner", hbBtn).CornerRadius = UDim.new(0, 6)
+
+-- Hitbox Slider
+local rangeLabel = Instance.new("TextLabel")
+rangeLabel.Size = UDim2.new(1, -20, 0, 20)
+rangeLabel.Position = UDim2.new(0, 10, 0, 170)
+rangeLabel.BackgroundTransparency = 1
+rangeLabel.Font = Enum.Font.GothamBold
+rangeLabel.TextSize = 12
+rangeLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+rangeLabel.TextXAlignment = Enum.TextXAlignment.Left
+rangeLabel.Text = "Hitbox Range: INFINITE"
+rangeLabel.Parent = main
+
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(1, -20, 0, 6)
+bar.Position = UDim2.new(0, 10, 0, 195)
+bar.BackgroundColor3 = Color3.fromRGB(55, 55, 70)
+bar.BorderSizePixel = 0
+bar.Parent = main
+Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+
+local fill = Instance.new("Frame")
+fill.Size = UDim2.new(1, 0, 1, 0)
+fill.BackgroundColor3 = Color3.fromRGB(90, 150, 230)
+fill.BorderSizePixel = 0
+fill.Parent = bar
+Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+
+local knob = Instance.new("Frame")
+knob.Size = UDim2.fromOffset(14, 14)
+knob.Position = UDim2.new(1, -7, 0.5, -7)
+knob.BackgroundColor3 = Color3.fromRGB(240, 240, 245)
+knob.BorderSizePixel = 0
+knob.Parent = bar
+Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+-- Hide/Show Button
+local hideBtn = Instance.new("TextButton")
+hideBtn.Size = UDim2.new(1, -20, 0, 25)
+hideBtn.Position = UDim2.new(0, 10, 1, -35)
+hideBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+hideBtn.TextColor3 = Color3.new(1, 1, 1)
+hideBtn.Font = Enum.Font.GothamBold
+hideBtn.TextSize = 12
+hideBtn.Text = "Hide UI"
+hideBtn.Active = true
+hideBtn.Parent = main
+Instance.new("UICorner", hideBtn).CornerRadius = UDim.new(0, 6)
+
+-- Restore Button
+local restoreBtn = Instance.new("TextButton")
+restoreBtn.Size = UDim2.new(0, 100, 0, 30)
+restoreBtn.Position = UDim2.new(0, 10, 0, 10)
+restoreBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+restoreBtn.TextColor3 = Color3.new(1, 1, 1)
+restoreBtn.Font = Enum.Font.GothamBold
+restoreBtn.TextSize = 12
+restoreBtn.Text = "Show epussy Suite"
+restoreBtn.Active = true
+restoreBtn.Visible = false
+restoreBtn.Parent = gui
+Instance.new("UICorner", restoreBtn).CornerRadius = UDim.new(0, 6)
+
+-- 3. UI Logic
+hideBtn.MouseButton1Click:Connect(function()
+    main.Visible = false
+    restoreBtn.Visible = true
+end)
+
+restoreBtn.MouseButton1Click:Connect(function()
+    main.Visible = true
+    restoreBtn.Visible = false
+end)
+
+-- ===== TOGGLES =====
+pwBtn.MouseButton1Click:Connect(function()
+    isPermaWeave = not isPermaWeave
+    pwBtn.Text = isPermaWeave and "Perma Weave: ON" or "Perma Weave: OFF"
+    pwBtn.BackgroundColor3 = isPermaWeave and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(200, 50, 50)
+    if not isPermaWeave then
+        pcall(function() Combat.Weave:Fire(false) end)
+        pcall(function() Combat.Weave:FireServer(false) end)
+    end
+end)
+
+ndBtn.MouseButton1Click:Connect(function()
+    isNoDelay = not isNoDelay
+    ndBtn.Text = isNoDelay and "No Delay: ON" or "No Delay: OFF"
+    ndBtn.BackgroundColor3 = isNoDelay and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(200, 50, 50)
+end)
+
+hbBtn.MouseButton1Click:Connect(function()
+    isHitbox = not isHitbox
+    hbBtn.Text = isHitbox and "Infinite Hitbox: ON" or "Infinite Hitbox: OFF"
+    hbBtn.BackgroundColor3 = isHitbox and Color3.fromRGB(50, 200, 50) or Color3.fromRGB(200, 50, 50)
+end)
+
+-- Slider Logic
+local dragging = false
+local function setFromX(x)
+    local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+    local val = rel * 1000
+    if val >= 990 then val = math.huge end
+
+    maxRange = val
+    local frac = (val == math.huge) and 1 or rel
+    fill.Size = UDim2.new(frac, 0, 1, 0)
+    knob.Position = UDim2.new(frac, -7, 0.5, -7)
+
+    if val == math.huge then
+        rangeLabel.Text = "Hitbox Range: INFINITE"
+    else
+        rangeLabel.Text = string.format("Hitbox Range: %d studs", math.floor(val))
+    end
+end
+
+bar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        setFromX(input.Position.X)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        setFromX(input.Position.X)
+    end
+end)
+UserInputService.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+
+-- 4. Runtime Hooks
+RunService.Heartbeat:Connect(function()
+    -- Perma Weave Logic
+    if isPermaWeave then
+        local char = LP.Character
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then
+                pcall(function() Combat.Weave:Fire(true) end)
+                pcall(function() Combat.Weave:FireServer(true) end)
+                if char:GetAttribute("WeaveStun") == true then
+                    char:SetAttribute("WeaveStun", false)
+                end
+            end
+        end
+    end
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or not isPermaWeave then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        pcall(function() Combat.Weave:Fire(true) end)
+        pcall(function() Combat.Weave:FireServer(true) end)
+    end
+end)
+
+HitWindow.Start = function(kind, limb, track, group, ...)
+    local r = origHWStart(kind, limb, track, group, ...)
+
+    if kind == "Attack" then
+        -- No Delay Logic
+        if isNoDelay and Active then
+            Active.OpenFrame = true
+            Active.CanAttack = true
+        end
+
+        -- Hitbox Logic (using the collect/report method from the first script)
+        if isHitbox then
+            local seq = Active and Active.Seq or 1
+            local targets = collect(effectiveReach())
+            if #targets > 0 then
+                task.delay(0.02, function()
+                    for _, t in ipairs(targets) do
+                        if t.dist <= HITBOX_MAX then reportTarget(seq, t) end
+                    end
+                end)
+            end
+        end
+    end
+
+    return r
+end
+
+print("[epussy] Ultimate Suite Loaded!")
